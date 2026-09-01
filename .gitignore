@@ -1,0 +1,52 @@
+# Node
+node_modules/
+dist/
+build/
+out/
+
+# Android / Gradle
+.gradle/
+.kotlin/
+build/
+captures/
+.externalNativeBuild/
+.cxx/
+local.properties
+debug.keystore
+*.jks
+*.keystore
+*.apks
+*.aab
+
+# Secrets — never commit these
+*.pem
+*-key.pem
+.env
+.env.*
+!.env.example
+
+# Logs
+*.log
+tmp/
+server/tmp/
+android/tmp/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editors
+.vscode/
+.idea/
+*.iml
+.idea/caches
+.idea/libraries
+.idea/modules.xml
+.idea/workspace.xml
+.idea/navEditor.xml
+.idea/assetWizardSettings.xml
+.idea/dictionaries
+
+# Pi sessions (runtime)
+.pi/
+.pi-local/

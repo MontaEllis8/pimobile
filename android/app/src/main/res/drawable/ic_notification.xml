@@ -1,0 +1,11 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <!-- Speech bubble with text lines — standard Material notification silhouette.
+         System forces white tint on status bar, so fill must be white. -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M20,2H4C2.9,2 2,2.9 2,4v18l4,-4h14c1.1,0 2,-0.9 2,-2V4C22,2.9 21.1,2 20,2zM18,11H6v-2h12V11zM15,15H6v-2h9V15z" />
+</vector>

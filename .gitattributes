@@ -1,0 +1,26 @@
+# Normalize line endings across platforms
+* text=auto
+
+# Explicitly LF for code files
+*.py text eol=lf
+*.ts text eol=lf
+*.tsx text eol=lf
+*.js text eol=lf
+*.json text eol=lf
+*.md text eol=lf
+*.css text eol=lf
+*.kt text eol=lf
+*.kts text eol=lf
+
+# Windows batch files must keep CRLF
+*.bat text eol=crlf
+*.ps1 text eol=crlf
+
+# Binaries
+*.png binary
+*.jpg binary
+*.webm binary
+*.woff binary
+*.woff2 binary
+*.jks binary
+*.keystore binary
