@@ -114,7 +114,7 @@ if (readFiles.length > 0) {
 // ─────────────────────────────────────────
 console.log("\n── Test 3: new_session 指定 cwd ──\n");
 
-const testCwd = "D:\\worksave\\10-pi";
+const testCwd = "/tmp";
 ws.send(JSON.stringify({ type: "new_session", name: "cwd-test", cwd: testCwd }));
 const sw = await waitMessage(ws, "session_switched", 5000);
 test("指定 cwd 创建 session 成功", sw !== null, sw?.name || "");
@@ -126,7 +126,7 @@ if (sl && sl.sessions) {
   const cwdSession = sl.sessions.find(s => s.name === "cwd-test");
   test("session_list 包含新 session", cwdSession != null);
   if (cwdSession) {
-    test("session 的 project 匹配 cwd", cwdSession.project === testCwd || cwdSession.project?.includes("10-pi"), cwdSession.project);
+    test("session 的 project 匹配 cwd", cwdSession.project === testCwd || cwdSession.project?.includes("tmp"), cwdSession.project);
     console.log(`       name=${cwdSession.name} project=${cwdSession.project}`);
   }
 }

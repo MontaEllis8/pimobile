@@ -1,7 +1,7 @@
 /**
  * Pi Mobile 全自动功能测试
  *
- * 用法：服务器启动后，node D:/worksave/10-pi/02-pi-android/server/test.mjs
+ * 用法：服务器启动后，node server/test/archive/test.mjs
  *
  * 逐项测试协议层功能，无需 App 手动操作。
  */
