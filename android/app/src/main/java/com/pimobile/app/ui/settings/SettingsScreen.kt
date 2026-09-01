@@ -145,7 +145,7 @@ fun SettingsScreen(navController: NavController) {
                     value = editDefaultCwd,
                     onValueChange = { editDefaultCwd = it },
                     label = { Text("Default Project Path (CWD)", color = colors.textSecondary) },
-                    placeholder = { Text("D:\\worksave\\10-pi", color = colors.textSecondary.copy(alpha = 0.5f)) },
+                    placeholder = { Text("D:\\your\\work\\dir", color = colors.textSecondary.copy(alpha = 0.5f)) },
                     modifier = Modifier.fillMaxWidth().menuAnchor(),
                     singleLine = true,
                     trailingIcon = {
