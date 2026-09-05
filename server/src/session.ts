@@ -61,7 +61,9 @@ const TUI_COMMANDS = new Set([
 ]);
 
 const FALLBACK_PROVIDER = "opencode-go";
-const FALLBACK_MODEL = "ox-alpha-free";
+// NOTE 2026-09-05 (SDK 0.85.0 upgrade): ox-alpha-free returns empty turns (dead free model,
+// also removed from user's enabledModels) — fallback switched to deepseek-v4-flash.
+const FALLBACK_MODEL = "deepseek-v4-flash";
 
 // ── Helpers: default model resolution ──
 async function resolveDefaultModel(modelRuntime: ModelRuntime): Promise<{ provider: string; model: string } | null> {
@@ -975,10 +977,10 @@ export class PiSession {
                   this.sendStateUpdate(send);
                   return;
                 }
-                // Prefer direct SDK setThinkingLevel (0.84.3) with normalized value — clamped to model caps
+                // Prefer direct SDK setThinkingLevel (0.84.3+, typed in 0.85.0) with normalized value — clamped to model caps
                 try {
-                  if (typeof (this.session as any).setThinkingLevel === "function") {
-                    (this.session as any).setThinkingLevel(target as any);
+                  if (typeof this.session.setThinkingLevel === "function") {
+                    this.session.setThinkingLevel(target as any);
                     // Direct set already handles alias + clamp; return immediately with effective level
                     this.sendStateUpdate(send);
                     return;

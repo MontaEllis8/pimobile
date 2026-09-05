@@ -1,5 +1,5 @@
 /**
- * SDK 升级线 + 1.1 体验打磨 专项测试 (0.84.3)
+ * SDK 升级线 + 1.1 体验打磨 专项测试 (0.85.0)
  * 验证:
  * 1. set_auth 已废弃 → error
  * 2. set_model 错误路径 → error
@@ -115,7 +115,6 @@ async function testT2_setModelNotFound() {
 function readSettings() {
   const candidates = [
     join(homedir(), '.pi', 'agent', 'settings.json'),
-    'C:\\Users\\Administrator\\.pi\\agent\\settings.json',
     join(process.cwd(), '..', '.pi', 'agent', 'settings.json'),
   ];
   for (const p of candidates) {
@@ -196,12 +195,10 @@ async function testT3_getModels() {
         const first = ml.models[0];
         assert(first.provider === dp && first.id === di, 'T3g: defaultModel 置顶首位', `first=${first.provider}/${first.id} vs expected first=${dm}`);
       }
-      // Check specific expected ids are present (as spec requires)
-      const required = ['deepseek-v4-flash', 'ox-alpha-free', 'mimo-v2.5', 'muse-spark-1.2-contributor'];
-      for (const r of required) {
-        const found = ml.models.some(m => m.id === r);
-        assert(found, `T3h: 包含主力模型 ${r}`);
-      }
+      // T3h (retired 2026-09-05, SDK 0.85.0 upgrade): hardcoded主力清单
+      // ['deepseek-v4-flash','ox-alpha-free','mimo-v2.5','muse-spark-1.2-contributor']
+      // 已过时——用户 enabledModels 已演进 (7 个，无 ox-alpha-free)。
+      // T3d 已逐项断言 enabledModels 全量包含，此处不再重复硬编码检查。
     } else {
       // Fallback: at least filtered ≤10
       assert(ml.models.length <= 10, 'T3d: 模型列表已过滤（≤10，非全量1200+）', `got ${ml.models.length}`);
@@ -309,7 +306,7 @@ async function testT4_thinkLevels() {
 }
 
 async function run() {
-  console.log('🧪 SDK 升级线 + 1.1 体验打磨 (0.84.3) 专项测试');
+  console.log('🧪 SDK 升级线 + 1.1 体验打磨 (0.85.0) 专项测试');
   await testT1_setAuthDeprecated();
   await sleep(500);
   await testT2_setModelNotFound();
@@ -320,6 +317,6 @@ async function run() {
   console.log(`\n${'═'.repeat(48)}`);
   console.log(`Results: ${passed} passed, ${failed} failed, ${skipped} skipped`);
   if (failed > 0) { console.log('❌ Some tests FAILED!'); process.exit(1); }
-  else { console.log('✅ SDK 1.1 (0.84.3) tests PASSED'); process.exit(0); }
+  else { console.log('✅ SDK 1.1 (0.85.0) tests PASSED'); process.exit(0); }
 }
 run().catch((err) => { console.error('Fatal:', err.message); process.exit(1); });

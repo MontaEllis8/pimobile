@@ -4,6 +4,9 @@
  * 4002 退避重试已对齐 Android 端 63ca657
  */
 import WebSocket from "ws";
+import { readFileSync, existsSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 
 const HOST = process.env.TEST_HOST || "127.0.0.1";
 const WS_URL = `ws://${HOST}:8787/ws`;
@@ -100,8 +103,29 @@ await new Promise(r => setTimeout(r, 1000));
 
 ws.send(JSON.stringify({ type: "new_session", name: "file-v2-" + Date.now() }));
 await new Promise(r => setTimeout(r, 2000));
-// Phase 3: 使用有效模型，消除失效引用 ark-plan/deepseek-v4-flash → opencode-go/ox-alpha-free
-ws.send(JSON.stringify({ type: "set_model", provider: "opencode-go", model: "ox-alpha-free" }));
+// 2026-09-05 (SDK 0.85.0 upgrade): ox-alpha-free 已死（空回合）且移出 enabledModels。
+// 改为从 settings.json 动态取 defaultModel/enabledModels[0]，避免用户改配置就挂。
+function pickTestModel() {
+  try {
+    for (const p of [join(homedir(), ".pi", "agent", "settings.json")]) {
+      if (existsSync(p)) {
+        const s = JSON.parse(readFileSync(p, "utf-8"));
+        if (typeof s.defaultModel === "string" && s.defaultModel.includes("/")) {
+          const [prov, mod] = s.defaultModel.split("/", 2);
+          if (prov && mod) return { provider: prov, model: mod };
+        }
+        if (Array.isArray(s.enabledModels) && s.enabledModels.length > 0) {
+          const [prov, mod] = String(s.enabledModels[0]).split("/", 2);
+          if (prov && mod) return { provider: prov, model: mod };
+        }
+      }
+    }
+  } catch {}
+  return { provider: "opencode-go", model: "deepseek-v4-flash" };
+}
+const testModel = pickTestModel();
+console.log(`   🔧 测试模型: ${testModel.provider}/${testModel.model}`);
+ws.send(JSON.stringify({ type: "set_model", provider: testModel.provider, model: testModel.model }));
 await new Promise(r => setTimeout(r, 2000));
 
 console.log("── Step 1: AI 创建文件 ──");
