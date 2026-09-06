@@ -1,5 +1,5 @@
 /**
- * SDK 升级线 + 1.1 体验打磨 专项测试 (0.85.0)
+ * SDK 升级线 + 1.1 体验打磨 专项测试 (0.85.1)
  * 验证:
  * 1. set_auth 已废弃 → error
  * 2. set_model 错误路径 → error
@@ -306,7 +306,7 @@ async function testT4_thinkLevels() {
 }
 
 async function run() {
-  console.log('🧪 SDK 升级线 + 1.1 体验打磨 (0.85.0) 专项测试');
+  console.log('🧪 SDK 升级线 + 1.1 体验打磨 (0.85.1) 专项测试');
   await testT1_setAuthDeprecated();
   await sleep(500);
   await testT2_setModelNotFound();
@@ -317,6 +317,6 @@ async function run() {
   console.log(`\n${'═'.repeat(48)}`);
   console.log(`Results: ${passed} passed, ${failed} failed, ${skipped} skipped`);
   if (failed > 0) { console.log('❌ Some tests FAILED!'); process.exit(1); }
-  else { console.log('✅ SDK 1.1 (0.85.0) tests PASSED'); process.exit(0); }
+  else { console.log('✅ SDK 1.1 (0.85.1) tests PASSED'); process.exit(0); }
 }
 run().catch((err) => { console.error('Fatal:', err.message); process.exit(1); });

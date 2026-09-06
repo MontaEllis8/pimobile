@@ -13,8 +13,7 @@
     "test:integration": "node test/test-p0-fixes.mjs && node test/test-sessions.mjs && node test/test-batch4.mjs && node test/test-sdk-upgrade.mjs && node test/test-multi-session-switch.mjs && node test/test-file-download-v2.mjs && node test/test-abort-interrupt.mjs"
   },
   "dependencies": {
-    "@earendil-works/pi-coding-agent": "0.85.0",
-    "@earendil-works/pi-server": "0.85.0",
+    "@earendil-works/pi-coding-agent": "0.85.1",
     "dotenv": "^16.4.0",
     "ws": "^8.18.0"
   },
