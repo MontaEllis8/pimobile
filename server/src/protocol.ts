@@ -30,7 +30,7 @@ export type ServerMessage =
   | { type: "session_switched"; name: string; session_id?: string }
   | { type: "error"; message: string }
   | { type: "file_available"; id: string; name: string; size: number; content_type?: string }
-  | { type: "message_history"; name: string; messages: HistoryEntry[] }
+  | { type: "message_history"; name: string; messages: HistoryEntry[]; has_more?: boolean; total?: number }
   | { type: "model_list"; models: ModelInfo[] }
   | { type: "command_list"; commands: CommandInfo[] };
 

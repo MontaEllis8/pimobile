@@ -4,6 +4,10 @@ import android.app.Application
 import android.content.Intent
 import android.os.Build
 import android.util.Log
+import androidx.work.ExistingPeriodicWorkPolicy
+import androidx.work.PeriodicWorkRequestBuilder
+import androidx.work.WorkManager
+import com.pimobile.app.service.CacheCleanupWorker
 import com.pimobile.app.service.PiConnectionService
 import com.pimobile.app.ui.theme.ThemeState
 import kotlinx.coroutines.CoroutineScope
@@ -11,6 +15,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import java.util.concurrent.TimeUnit
 
 class PiApplication : Application() {
     private val appScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -55,6 +60,18 @@ class PiApplication : Application() {
             startForegroundService(intent)
         } else {
             startService(intent)
+        }
+
+        // B6: 7天周期清理 pi-files 过期缓存，避免永不清理导致存储无限增长
+        try {
+            val cleanupReq = PeriodicWorkRequestBuilder<CacheCleanupWorker>(7, TimeUnit.DAYS).build()
+            WorkManager.getInstance(this).enqueueUniquePeriodicWork(
+                "pi-cache-cleanup",
+                ExistingPeriodicWorkPolicy.KEEP,
+                cleanupReq,
+            )
+        } catch (e: Exception) {
+            Log.w("PiApplication", "Failed to schedule cache cleanup", e)
         }
     }
 }

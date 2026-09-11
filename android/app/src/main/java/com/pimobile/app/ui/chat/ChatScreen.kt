@@ -338,7 +338,10 @@ fun ChatScreen(
                     contentPadding = PaddingValues(top = if (!uiState.isConnected) 40.dp else 16.dp, start = 16.dp, end = 16.dp, bottom = 16.dp),
                     verticalArrangement = Arrangement.spacedBy(16.dp)
                 ) {
-                    items(uiState.messages, key = { it.id }) { message ->
+                    // A1 K7 fix: streaming message id is now stable (PiRepository forces
+                    // "streaming-<sessionKey>"), but keep this defensive so a future
+                    // regression cannot churn the LazyColumn key every chunk.
+                    items(uiState.messages, key = { if (it is com.pimobile.app.data.Message.Assistant && it.isStreaming) "streaming" else it.id }) { message ->
                         val ctx = LocalContext.current
                         MessageBubble(message = message, onDownloadFile = { fileId, filename ->
                             android.util.Log.d("ChatScreen", "onDownloadFile called: fileId=${fileId.take(30)}..., filename=$filename")

@@ -30,6 +30,14 @@ import com.pimobile.app.data.*
 import com.pimobile.app.ui.theme.*
 import androidx.compose.material.icons.outlined.ContentCopy
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.window.Dialog
+import coil.compose.AsyncImage
+import coil.compose.AsyncImagePainter
+import coil.request.ImageRequest
+import com.pimobile.app.AppContainer
+import java.io.File
 
 @Composable
 fun MessageBubble(message: Message, onDownloadFile: (id: String, filename: String) -> Unit = { _, _ -> }) {
@@ -313,7 +321,7 @@ fun ToolCallSection(section: AssistantSection.ToolCall) {
                             modifier = Modifier.padding(top = 2.dp)
                         )
                     }
-                    // P2-4: show the tool result output
+                    // P2-4: show the tool result output (with base64 image guard + preview)
                     if (section.output.isNotBlank()) {
                         Text(
                             "OUTPUT",
@@ -322,13 +330,62 @@ fun ToolCallSection(section: AssistantSection.ToolCall) {
                             color = colors.textSecondary,
                             modifier = Modifier.padding(top = 8.dp)
                         )
-                        Text(
-                            text = section.output,
-                            fontFamily = FontFamily.Monospace,
-                            fontSize = 12.sp,
-                            color = colors.textPrimary,
-                            modifier = Modifier.padding(top = 2.dp)
-                        )
+                        val isBase64Image = section.output.length > 2000 &&
+                            (section.output.contains("/9j/") ||
+                                section.output.contains("base64,") ||
+                                section.output.contains("iVBORw0KGgo") ||
+                                (section.output.length > 10000 && section.output.filter { !it.isWhitespace() }.take(2000).all { it.isLetterOrDigit() || it == '+' || it == '/' || it == '=' }))
+                        if (isBase64Image) {
+                            var showDialog by remember { mutableStateOf(false) }
+                            val kb = section.output.length / 1024
+                            val dataUri = remember(section.output) {
+                                val raw = section.output.trim()
+                                when {
+                                    raw.contains("data:image") -> raw.substring(raw.indexOf("data:image"))
+                                    raw.contains("/9j/") -> {
+                                        val b64 = raw.substring(raw.indexOf("/9j/")).filter { !it.isWhitespace() }
+                                        "data:image/jpeg;base64," + b64
+                                    }
+                                    raw.contains("iVBORw0KGgo") -> {
+                                        val b64 = raw.substring(raw.indexOf("iVBORw0KGgo")).filter { !it.isWhitespace() }
+                                        "data:image/png;base64," + b64
+                                    }
+                                    raw.contains("base64,") -> "data:image/jpeg;base64," + raw.substringAfter("base64,").filter { !it.isWhitespace() }
+                                    else -> "data:image/jpeg;base64," + raw.filter { !it.isWhitespace() }
+                                }
+                            }
+                            Column(modifier = Modifier.padding(top = 2.dp).clickable { showDialog = true }) {
+                                Text(
+                                    text = "[图片输出 ${kb}KB，点击预览]",
+                                    fontFamily = FontFamily.Monospace,
+                                    fontSize = 12.sp,
+                                    color = colors.primaryAccent,
+                                    textDecoration = androidx.compose.ui.text.style.TextDecoration.Underline
+                                )
+                                Spacer(modifier = Modifier.height(6.dp))
+                                AsyncImage(
+                                    model = ImageRequest.Builder(LocalContext.current).data(dataUri).crossfade(true).build(),
+                                    contentDescription = "tool image",
+                                    modifier = Modifier.fillMaxWidth().heightIn(max = 180.dp).clip(RoundedCornerShape(8.dp)),
+                                    contentScale = ContentScale.Crop
+                                )
+                            }
+                            if (showDialog) {
+                                Dialog(onDismissRequest = { showDialog = false }) {
+                                    Box(modifier = Modifier.fillMaxWidth().wrapContentHeight().background(colors.surfaceColor, RoundedCornerShape(12.dp)).padding(8.dp)) {
+                                        AsyncImage(model = dataUri, contentDescription = "preview", modifier = Modifier.fillMaxWidth().wrapContentHeight(), contentScale = ContentScale.Fit)
+                                    }
+                                }
+                            }
+                        } else {
+                            Text(
+                                text = section.output,
+                                fontFamily = FontFamily.Monospace,
+                                fontSize = 12.sp,
+                                color = colors.textPrimary,
+                                modifier = Modifier.padding(top = 2.dp)
+                            )
+                        }
                     }
                 }
             }
@@ -339,31 +396,142 @@ fun ToolCallSection(section: AssistantSection.ToolCall) {
 @Composable
 fun FileLinkSection(section: AssistantSection.FileLink, onDownload: (id: String, filename: String) -> Unit = { _, _ -> }) {
     val colors = LocalAppColors.current
+    val isImage = section.contentType?.startsWith("image/") == true
     val emoji = when {
         section.contentType?.startsWith("text/html") == true -> "🌐"
-        section.contentType?.startsWith("image/") == true -> "🖼️"
+        isImage -> "🖼️"
         section.contentType?.startsWith("text/") == true -> "📄"
         section.contentType?.startsWith("application/pdf") == true -> "📑"
         else -> "📦"
     }
-    Surface(
-        color = colors.outlineColor,
-        shape = RoundedCornerShape(8.dp),
-        border = BorderStroke(1.dp, colors.outlineVariant),
-        modifier = Modifier.fillMaxWidth().clickable { onDownload(section.id, section.filename) }
-    ) {
-        Row(
-            modifier = Modifier.padding(12.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
+    if (isImage) {
+        val context = LocalContext.current
+        // 优先用本地已下载缓存，命中则秒开；未命中则用远程 http url 让 Coil 直连下载缩略图
+        val cachedFile = remember(section.id, section.filename) {
+            findCachedImageFile(context, section.filename)
+        }
+        val baseUrl = remember {
+            try { AppContainer.repository.getBaseUrl() } catch (_: Exception) { "" }
+        }
+        val imageModel: Any? = when {
+            cachedFile != null && cachedFile.exists() -> cachedFile
+            baseUrl.isNotBlank() -> "$baseUrl/files/${section.id}"
+            else -> null
+        }
+        Surface(
+            color = colors.outlineColor,
+            shape = RoundedCornerShape(8.dp),
+            border = BorderStroke(1.dp, colors.outlineVariant),
+            modifier = Modifier.fillMaxWidth()
         ) {
-            Column(modifier = Modifier.weight(1f)) {
-                Text("$emoji ${section.filename}", style = MaterialTheme.typography.bodyMedium, color = colors.textPrimary)
-                Text("${section.size}", style = MaterialTheme.typography.labelSmall, color = colors.textSecondary)
+            Column(modifier = Modifier.padding(8.dp)) {
+                if (imageModel != null) {
+                    // L0 fix — Coil thumbnail for non-image / broken content must show error placeholder instead of blank
+                    var imageError by remember(section.id) { mutableStateOf(false) }
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(180.dp)
+                            .clip(RoundedCornerShape(8.dp))
+                            .clickable { onDownload(section.id, section.filename) }
+                    ) {
+                        AsyncImage(
+                            model = ImageRequest.Builder(context)
+                                .data(imageModel)
+                                .crossfade(true)
+                                .build(),
+                            contentDescription = section.filename,
+                            modifier = Modifier.fillMaxSize(),
+                            contentScale = ContentScale.Crop,
+                            onState = { state ->
+                                if (state is AsyncImagePainter.State.Error) imageError = true
+                                if (state is AsyncImagePainter.State.Success) imageError = false
+                            },
+                            // placeholder/fallback keep blank; error is handled by overlay below
+                        )
+                        if (imageError) {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .background(colors.surfaceContainer),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                    Icon(
+                                        androidx.compose.material.icons.Icons.Filled.Warning,
+                                        contentDescription = "load failed",
+                                        tint = MaterialTheme.colorScheme.error,
+                                        modifier = Modifier.size(28.dp)
+                                    )
+                                    Spacer(modifier = Modifier.height(4.dp))
+                                    Text(
+                                        "图片加载失败，点 OPEN 重试",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = colors.textSecondary
+                                    )
+                                }
+                            }
+                        }
+                    }
+                    Spacer(modifier = Modifier.height(8.dp))
+                }
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { onDownload(section.id, section.filename) }
+                        .padding(horizontal = 4.dp, vertical = 4.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text("$emoji ${section.filename}", style = MaterialTheme.typography.bodyMedium, color = colors.textPrimary)
+                        Text(section.size, style = MaterialTheme.typography.labelSmall, color = colors.textSecondary)
+                    }
+                    Text("OPEN ↗", color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.labelSmall)
+                }
             }
-            Text("OPEN ↗", color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.labelSmall)
+        }
+    } else {
+        Surface(
+            color = colors.outlineColor,
+            shape = RoundedCornerShape(8.dp),
+            border = BorderStroke(1.dp, colors.outlineVariant),
+            modifier = Modifier.fillMaxWidth().clickable { onDownload(section.id, section.filename) }
+        ) {
+            Row(
+                modifier = Modifier.padding(12.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("$emoji ${section.filename}", style = MaterialTheme.typography.bodyMedium, color = colors.textPrimary)
+                    Text(section.size, style = MaterialTheme.typography.labelSmall, color = colors.textSecondary)
+                }
+                Text("OPEN ↗", color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.labelSmall)
+            }
         }
     }
+}
+
+/** B6: 查找本地已缓存的图片文件（命中则 Coil 直接加载本地文件，无需再走网络） */
+private fun findCachedImageFile(context: android.content.Context, filename: String): File? {
+    if (filename.isBlank()) return null
+    val safeName = filename.ifBlank { "download" }
+        .replace(Regex("""[<>:\"/\\\\|?*]"""), "_")
+        .replace(Regex("""\.\.+"""), "_")
+        .trimStart('.', '/')
+        .ifBlank { "download" }
+    val roots = listOfNotNull(context.externalCacheDir, context.cacheDir)
+    for (root in roots) {
+        val piFiles = File(root, "pi-files")
+        if (!piFiles.exists()) continue
+        // 扫描所有 session 子目录下同名文件，取最新一个
+        val candidates = piFiles.walkTopDown().filter { it.isFile && it.name == safeName }.toList()
+        if (candidates.isNotEmpty()) {
+            return candidates.maxByOrNull { it.lastModified() }
+        }
+    }
+    return null
 }
 
 @Composable

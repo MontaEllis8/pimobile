@@ -200,7 +200,9 @@ data class FileAvailableMessage(
 
 data class MessageHistory(
     val name: String,
-    val messages: List<Any>
+    val messages: List<Any>,
+    val has_more: Boolean? = null,
+    val total: Int? = null
 ) : ServerMessage {
     override val type = "message_history"
 }

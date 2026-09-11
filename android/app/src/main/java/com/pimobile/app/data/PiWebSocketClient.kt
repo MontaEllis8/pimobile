@@ -146,12 +146,16 @@ class PiWebSocketClient {
     }
 
     private fun scheduleReconnect() {
-        // Unlimited reconnect with exponential backoff capped at 60s.
+        // Unlimited reconnect with exponential backoff capped at 60s + 0-30% jitter.
+        // Jitter avoids thundering-herd when many devices reconnect at once.
         // Survives lock-screen/Doze recovery, server restarts, and network handoffs.
         // (No upper bound on attempts — a transient network blip hours later should still recover.)
         val myGen = generation
         val shift = reconnectCount.coerceAtMost(6)  // Cap shift to avoid overflow beyond 2^6
-        val delay = minOf(baseReconnectDelayMs * (1L shl shift), maxReconnectDelayMs)
+        val baseDelay = minOf(baseReconnectDelayMs * (1L shl shift), maxReconnectDelayMs)
+        // A1 jitter: 0-30% random on top of baseDelay
+        val jitter = (Math.random() * baseDelay * 0.3).toLong()
+        val delay = baseDelay + jitter
         reconnectCount++
 
         _connectionState.value = ConnectionState.CONNECTING

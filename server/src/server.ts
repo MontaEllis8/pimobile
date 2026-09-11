@@ -4,6 +4,9 @@ import { SessionRegistry } from "./SessionRegistry.js";
 import { config } from "./config.js";
 import type { ClientMessage, ServerMessage } from "./protocol.js";
 import { getContentType } from "./contentType.js";
+import Bonjour from "bonjour-service";
+import { hostname } from "node:os";
+import { logger } from "./logger.js";
 
 /**
  * Start the WebSocket server for the Pi Android backend.
@@ -54,14 +57,14 @@ export async function startServer(): Promise<void> {
   // hands over cleanly instead.
   let activeWs: WebSocket | null = null;
 
-  console.log(`Pi Android Server v3 listening on ws://${config.host}:${config.port}/ws`);
+  logger.info(`Pi Android Server v3 listening on ws://${config.host}:${config.port}/ws`);
   if (!config.authToken) {
     // P0-6 S1: open-access must be unmissable in logs (ERROR level per FIX-PLAN)
-    console.error("⚠️  AUTH_TOKEN is empty — server is in OPEN ACCESS mode. Any device on LAN can control this agent!");
-    console.error("⚠️  Set AUTH_TOKEN env var before any use beyond personal LAN. See README → Security.");
+    logger.error("⚠️  AUTH_TOKEN is empty — server is in OPEN ACCESS mode. Any device on LAN can control this agent!");
+    logger.error("⚠️  Set AUTH_TOKEN env var before any use beyond personal LAN. See README → Security.");
   }
-  console.log(`Auth token: ${config.authToken ? "configured" : "none (open access)"}`);
-  console.log(`Sessions: ${registry.keys().length} loaded`);
+  logger.info({ auth: config.authToken ? "configured" : "none (open access)" }, "Auth token");
+  logger.info({ count: registry.keys().length }, "Sessions loaded");
 
   wss.on("connection", async (ws: WebSocket, req: IncomingMessage) => {
     try {
@@ -78,9 +81,7 @@ export async function startServer(): Promise<void> {
         authHeader?.startsWith("Bearer ") ? authHeader.slice(7).trim() : undefined;
       const token = headerToken ?? url.searchParams.get("token");
       if (config.authToken && token !== config.authToken) {
-        console.warn(
-          `Unauthorized connection attempt from ${req.socket.remoteAddress}`
-        );
+        logger.warn({ remoteAddress: req.socket.remoteAddress, type: "auth" }, "Unauthorized connection attempt");
         ws.close(4001, "Unauthorized");
         return;
       }
@@ -90,15 +91,13 @@ export async function startServer(): Promise<void> {
       // handler would call onDisconnect() and wipe the new binding. Rejecting
       // the newcomer is the safe move.)
       if (activeWs && activeWs !== ws && activeWs.readyState === WebSocket.OPEN) {
-        console.warn(
-          `Rejecting duplicate connection from ${req.socket.remoteAddress} (single-client)`
-        );
+        logger.warn({ remoteAddress: req.socket.remoteAddress, type: "duplicate" }, "Rejecting duplicate connection (single-client)");
         ws.close(4002, "Already connected");
         return;
       }
       activeWs = ws;
 
-      console.log(`Android connected from ${req.socket.remoteAddress}`);
+      logger.info({ remoteAddress: req.socket.remoteAddress }, "Android connected");
 
       // ── Per-connection rate limiter (token bucket) ──
       const RATE_BURST = 5;
@@ -143,9 +142,7 @@ export async function startServer(): Promise<void> {
         ) {
           droppedChunkFrames++;
           if (droppedChunkFrames % 100 === 1) {
-            console.warn(
-              `wsSend: dropping stream chunk (buffered ${(ws as any).bufferedAmount} bytes, dropped so far: ${droppedChunkFrames})`
-            );
+            logger.warn({ bufferedAmount: (ws as any).bufferedAmount, droppedChunkFrames, type: "backpressure" }, "wsSend: dropping stream chunk");
           }
           return;
         }
@@ -167,12 +164,16 @@ export async function startServer(): Promise<void> {
           wsSend({ type: "command_list", commands: cmds });
         }
 
-        const history = active.getHistory();
+        // A2 pagination: send only latest 50 to avoid 5MB+ WS frame
+        const fullHist = active.getHistory();
+        const history = fullHist.length > 50 ? active.getHistory({ limit: 50 }) : fullHist;
         if (history && history.length > 0) {
           wsSend({
             type: "message_history",
             name: active.getName(),
             messages: history,
+            has_more: fullHist.length > history.length,
+            total: fullHist.length,
           });
         }
       }
@@ -206,13 +207,16 @@ export async function startServer(): Promise<void> {
                 name: msg.name,
                 session_id: activated.getSessionId(),
               });
-              // Send history for the newly activated session
-              const hist = activated.getHistory();
+              // A2 pagination: send only latest 50
+              const fullHist2 = activated.getHistory();
+              const hist = fullHist2.length > 50 ? activated.getHistory({ limit: 50 }) : fullHist2;
               if (hist && hist.length > 0) {
                 wsSend({
                   type: "message_history",
                   name: msg.name,
                   messages: hist,
+                  has_more: fullHist2.length > hist.length,
+                  total: fullHist2.length,
                 });
               }
               // Sync state (thinking_level, tokens, etc.)
@@ -254,12 +258,15 @@ export async function startServer(): Promise<void> {
               // Sync history + state for the now-active session
               const active = registry.getActive();
               if (active) {
-                const hist = active.getHistory();
+                const fullHist3 = active.getHistory();
+                const hist = fullHist3.length > 50 ? active.getHistory({ limit: 50 }) : fullHist3;
                 if (hist && hist.length > 0) {
                   wsSend({
                     type: "message_history",
                     name: newName,
                     messages: hist,
+                    has_more: fullHist3.length > hist.length,
+                    total: fullHist3.length,
                   });
                 }
                 active.requestStateUpdate(wsSend);
@@ -331,7 +338,7 @@ export async function startServer(): Promise<void> {
           const text = data.toString();
           msg = JSON.parse(text);
         } catch (err: any) {
-          console.error("Error parsing message:", err);
+          logger.error({ err, type: "parse" }, "Error parsing message");
           if (ws.readyState === WebSocket.OPEN) {
             wsSend({
               type: "error",
@@ -343,7 +350,7 @@ export async function startServer(): Promise<void> {
         // P0-1 A1 fix: abort bypasses messageChain — prompt() blocks the chain for entire turn
         if (msg.type === "abort") {
           processMessage(msg).catch((err: any) => {
-            console.error("Error processing message:", err);
+            logger.error({ err, type: msg.type }, "Error processing message");
             if (ws.readyState === WebSocket.OPEN) {
               wsSend({
                 type: "error",
@@ -358,7 +365,7 @@ export async function startServer(): Promise<void> {
         messageChain = messageChain
           .then(() => processMessage(msg))
           .catch((err: any) => {
-            console.error("Error processing message:", err);
+            logger.error({ err, type: msg.type }, "Error processing message");
             if (ws.readyState === WebSocket.OPEN) {
               wsSend({
                 type: "error",
@@ -383,32 +390,42 @@ export async function startServer(): Promise<void> {
         // call onDisconnect() — it would wipe the new connection's sendCallback
         // and every event would go nowhere.
         if (activeWs !== ws) {
-          console.log(`Stale connection closed (${reason}, already replaced)`);
+          logger.info({ reason }, "Stale connection closed (already replaced)");
           return;
         }
         activeWs = null;
         unbind();
         registry.onDisconnect();
-        console.log(`Android disconnected (${reason}, sessions preserved)`);
+        logger.info({ reason }, "Android disconnected (sessions preserved)");
       };
       ws.on("close", () => handleDisconnect("close"));
       ws.on("error", (err: Error) => {
-        console.error("WebSocket error:", err);
+        logger.error({ err, type: "ws" }, "WebSocket error");
         handleDisconnect("error");
       });
     } catch (err) {
-      console.error("Failed to initialize session:", err);
+      logger.error({ err }, "Failed to initialize session");
       ws.close(1011, "Internal server error");
     }
   });
 
   wss.on("error", (err: Error) => {
-    console.error("WebSocket server error:", err);
+    logger.error({ err }, "WebSocket server error");
   });
+
+  // ── mDNS publish (_pimobile._tcp) ──
+  let bonjour: InstanceType<typeof Bonjour> | null = null;
 
   // ── Graceful shutdown ──
   const shutdown = () => {
-    console.log("\nShutting down server...");
+    logger.info("Shutting down server...");
+    try {
+      bonjour?.unpublishAll(() => {
+        bonjour?.destroy();
+      });
+    } catch {
+      // ignore mDNS teardown errors
+    }
     registry.dispose();
     wss.close();
     httpServer.close();
@@ -418,12 +435,27 @@ export async function startServer(): Promise<void> {
   process.on("SIGINT", shutdown);
 
   // Start listening
-  httpServer.listen(config.port, config.host);
+  httpServer.listen(config.port, config.host, () => {
+    // Publish mDNS after successful bind — try/catch so mDNS failure never kills main service
+    try {
+      bonjour = new Bonjour();
+      bonjour.publish({
+        name: `Pi Mobile-${hostname()}`,
+        type: "pimobile",
+        protocol: "tcp",
+        port: config.port,
+        txt: { version: "1.1.1", host: config.host },
+      });
+      logger.info({ port: config.port }, "mDNS: published _pimobile._tcp");
+    } catch (err: any) {
+      logger.warn({ err }, "mDNS publish failed (non-fatal)");
+    }
+  });
   httpServer.on("error", (err: any) => {
     if (err.code === "EADDRINUSE") {
-      console.error(`\n❌ Port ${config.port} is already in use.`);
-      console.error(`   Run: npx kill-port ${config.port}`);
-      console.error(`   Or check: netstat -ano | findstr :${config.port}\n`);
+      logger.error(`Port ${config.port} is already in use.`);
+      logger.error(`Run: npx kill-port ${config.port}`);
+      logger.error(`Or check: netstat -ano | findstr :${config.port}`);
     }
     throw err;
   });

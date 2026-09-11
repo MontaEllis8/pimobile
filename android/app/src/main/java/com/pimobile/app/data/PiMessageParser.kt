@@ -125,7 +125,9 @@ object PiMessageParser {
                 } else emptyList()
                 MessageHistory(
                     name = obj.optString("name", ""),
-                    messages = messages
+                    messages = messages,
+                    has_more = if (obj.has("has_more") && !obj.isNull("has_more")) obj.optBoolean("has_more") else null,
+                    total = if (obj.has("total") && !obj.isNull("total")) obj.optInt("total") else null
                 )
             }
 

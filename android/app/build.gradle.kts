@@ -14,8 +14,8 @@ android {
     applicationId = "com.pimobile.app"
     minSdk = 26
     targetSdk = 35
-    versionCode = 1
-    versionName = "1.0"
+    versionCode = 3
+    versionName = "1.2.0"
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
   }
@@ -127,6 +127,10 @@ dependencies {
   // Network & Data (Phase 3)
   implementation(libs.okhttp)
   implementation(libs.androidx.datastore.preferences)
+  implementation(libs.commonmark)
+  implementation(libs.commonmark.ext.gfm.tables)
+  implementation(libs.coil.compose)
+  implementation(libs.androidx.work.runtime.ktx)
   testImplementation(libs.androidx.compose.ui.test.junit4)
   testImplementation(libs.androidx.core)
   testImplementation(libs.androidx.junit)

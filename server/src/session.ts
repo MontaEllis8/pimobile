@@ -1,9 +1,13 @@
-import { createAgentSession, getAgentDir, ModelRuntime, SessionManager } from "@earendil-works/pi-coding-agent";
+import { ModelRuntime, SessionManager } from "@earendil-works/pi-coding-agent";
 import type { AgentSession, AgentSessionEvent, SessionStats } from "@earendil-works/pi-coding-agent";
 import type { ClientMessage, ServerMessage } from "./protocol.js";
 import { getContentType } from "./contentType.js";
-import { resolve } from "node:path";
 import { existsSync, statSync } from "node:fs";
+import { sessionLogger } from "./logger.js";
+import { getFilteredModels, resolveDefaultModel } from "./modelService.js";
+import { createFileHelpers } from "./fileRegistry.js";
+import { createModelRuntime, createSdkSession } from "./sdkAdapter.js";
+import { resolveUnifiedPath, extractBashFileTargets } from "./pathResolver.js";
 
 interface FileMeta {
   id: string;
@@ -60,257 +64,6 @@ const TUI_COMMANDS = new Set([
   "hotkeys", "clone", "trust", "logout", "reload",
 ]);
 
-const FALLBACK_PROVIDER = "opencode-go";
-// NOTE 2026-09-05 (SDK 0.85.0 upgrade): ox-alpha-free returns empty turns (dead free model,
-// also removed from user's enabledModels) — fallback switched to deepseek-v4-flash.
-const FALLBACK_MODEL = "deepseek-v4-flash";
-
-// ── Helpers: default model resolution ──
-async function resolveDefaultModel(modelRuntime: ModelRuntime): Promise<{ provider: string; model: string } | null> {
-  // 1. Try reading ~/.pi/agent/settings.json defaultModel
-  try {
-    const { join } = await import("node:path");
-    const { readFileSync, existsSync } = await import("node:fs");
-    const settingsPath = join(getAgentDir(), "settings.json");
-    if (existsSync(settingsPath)) {
-      const raw = readFileSync(settingsPath, "utf-8");
-      if (raw) {
-        const settings = JSON.parse(raw);
-        const defaultModelStr: string | undefined = settings.defaultModel;
-        const defaultProviderStr: string | undefined = settings.defaultProvider;
-        if (typeof defaultModelStr === "string" && defaultModelStr.trim().length > 0) {
-          const trimmed = defaultModelStr.trim();
-          if (trimmed.includes("/")) {
-            const [p, m] = trimmed.split("/", 2);
-            if (p && m) {
-              const candidate = modelRuntime.getModel(p, m);
-              if (candidate) return { provider: p, model: m };
-            }
-          } else if (typeof defaultProviderStr === "string" && defaultProviderStr.trim().length > 0) {
-            const candidate = modelRuntime.getModel(defaultProviderStr.trim(), trimmed);
-            if (candidate) return { provider: defaultProviderStr.trim(), model: trimmed };
-          } else {
-            // Search any provider that has this model id
-            const all = modelRuntime.getModels() as any[];
-            const found = all.find((mdl: any) => (mdl.id || mdl.model) === trimmed);
-            if (found) return { provider: found.provider || FALLBACK_PROVIDER, model: trimmed };
-          }
-        }
-        // Fallback: enabledModels list
-        if (Array.isArray(settings.enabledModels) && settings.enabledModels.length > 0) {
-          for (const entry of settings.enabledModels) {
-            if (typeof entry === "string" && entry.includes("/")) {
-              const [p, m] = entry.split("/", 2);
-              if (p && m) {
-                const candidate = modelRuntime.getModel(p, m);
-                if (candidate) return { provider: p, model: m };
-              }
-            }
-          }
-        }
-      }
-    }
-  } catch {
-    // ignore and fallback
-  }
-
-  // 2. Fallback to first model that has a configured provider (via getAvailableSnapshot if available)
-  try {
-    const snap = (modelRuntime as any).getAvailableSnapshot?.() as any[] | undefined;
-    if (Array.isArray(snap) && snap.length > 0) {
-      const first = snap[0];
-      const provider = first.provider || FALLBACK_PROVIDER;
-      const model = first.id || first.model || first.name;
-      if (provider && model) return { provider, model };
-    }
-  } catch {
-    // ignore
-  }
-
-  // 3. Ultimate fallback
-  const fallback = modelRuntime.getModel(FALLBACK_PROVIDER, FALLBACK_MODEL);
-  if (fallback) return { provider: FALLBACK_PROVIDER, model: FALLBACK_MODEL };
-
-  // Last resort: first from getModels
-  try {
-    const all = modelRuntime.getModels() as any[];
-    if (all.length > 0) {
-      const first = all[0];
-      return { provider: first.provider || FALLBACK_PROVIDER, model: first.id || first.model || FALLBACK_MODEL };
-    }
-  } catch {
-    // ignore
-  }
-
-  return null;
-}
-
-// ── Helpers: model filtering (1.1 polish: three-level priority) ──
-async function getFilteredModels(modelRuntime: ModelRuntime, currentModel?: { provider: string; model: string } | null): Promise<Array<{ id: string; provider: string; name: string; context_window: number }>> {
-  const allModels = modelRuntime.getModels() as any[];
-
-  // ── Priority 1: enabledModels from settings.json ──
-  try {
-    const { join } = await import("node:path");
-    const { readFileSync, existsSync } = await import("node:fs");
-    const settingsPath = join(getAgentDir(), "settings.json");
-    if (existsSync(settingsPath)) {
-      const raw = readFileSync(settingsPath, "utf-8");
-      if (raw) {
-        const settings = JSON.parse(raw);
-        if (Array.isArray(settings.enabledModels) && settings.enabledModels.length > 0) {
-          const filtered: Array<{ id: string; provider: string; name: string; context_window: number }> = [];
-          for (const entry of settings.enabledModels) {
-            if (typeof entry === "string" && entry.includes("/")) {
-              const [p, m] = entry.split("/", 2);
-              const candidate = allModels.find((mdl: any) => mdl.provider === p && (mdl.id === m || mdl.model === m || mdl.name === m));
-              if (candidate) {
-                filtered.push({
-                  id: candidate.id || candidate.model || candidate.name,
-                  provider: candidate.provider || "",
-                  name: candidate.name || candidate.id || "",
-                  context_window: candidate.contextWindow ?? candidate.context_window ?? 0,
-                });
-              } else {
-                const cand2 = modelRuntime.getModel(p, m) as any;
-                if (cand2) {
-                  filtered.push({
-                    id: (cand2 as any).id || m,
-                    provider: (cand2 as any).provider || p,
-                    name: (cand2 as any).name || m,
-                    context_window: (cand2 as any).contextWindow ?? 0,
-                  });
-                }
-              }
-            }
-          }
-          if (filtered.length > 0) {
-            // If defaultModel is configured, ensure it is at the front
-            if (typeof settings.defaultModel === "string" && settings.defaultModel.trim().length > 0) {
-              let dmProvider: string | null = null;
-              let dmId: string | null = null;
-              const trimmed = settings.defaultModel.trim();
-              if (trimmed.includes("/")) {
-                const [p, m] = trimmed.split("/", 2);
-                dmProvider = p;
-                dmId = m;
-              } else if (typeof settings.defaultProvider === "string" && settings.defaultProvider.trim().length > 0) {
-                dmProvider = settings.defaultProvider.trim();
-                dmId = trimmed;
-              } else {
-                const found = allModels.find((mdl: any) => mdl.id === trimmed || mdl.model === trimmed);
-                if (found) {
-                  dmProvider = found.provider;
-                  dmId = trimmed;
-                }
-              }
-              if (dmProvider && dmId) {
-                const idx = filtered.findIndex((f) => f.provider === dmProvider && f.id === dmId);
-                if (idx > 0) {
-                  const [item] = filtered.splice(idx, 1);
-                  filtered.unshift(item);
-                } else if (idx === -1) {
-                  const cand = allModels.find((mdl: any) => mdl.provider === dmProvider && (mdl.id === dmId || mdl.model === dmId));
-                  if (cand) {
-                    filtered.unshift({
-                      id: cand.id || cand.model || dmId!,
-                      provider: cand.provider || dmProvider!,
-                      name: cand.name || cand.id || dmId!,
-                      context_window: cand.contextWindow ?? cand.context_window ?? 0,
-                    });
-                  } else {
-                    const cand2 = modelRuntime.getModel(dmProvider, dmId) as any;
-                    if (cand2) {
-                      filtered.unshift({
-                        id: (cand2 as any).id || dmId!,
-                        provider: (cand2 as any).provider || dmProvider!,
-                        name: (cand2 as any).name || dmId!,
-                        context_window: (cand2 as any).contextWindow ?? 0,
-                      });
-                    }
-                  }
-                }
-              }
-            }
-            return filtered;
-          }
-        }
-      }
-    }
-  } catch (e) {
-    console.warn("[models] Failed to read settings.json:", e);
-  }
-
-  // ── Priority 2: providers with configured Key in auth.json ──
-  const configuredProviders = new Set<string>();
-  try {
-    const { join } = await import("node:path");
-    const { readFileSync, existsSync } = await import("node:fs");
-    const authPath = join(getAgentDir(), "auth.json");
-    if (existsSync(authPath)) {
-      const raw = readFileSync(authPath, "utf-8");
-      if (raw) {
-        const auth = JSON.parse(raw);
-        for (const [provider, entry] of Object.entries(auth)) {
-          if (entry && typeof entry === "object" && (entry as any).key) {
-            configuredProviders.add(provider.toLowerCase());
-          }
-        }
-      }
-    }
-  } catch (e) {
-    console.warn("[models] Failed to read auth.json:", e);
-  }
-
-  const usable: Array<{ id: string; provider: string; name: string; context_window: number }> = [];
-  for (const m of allModels) {
-    const providerLower = (m.provider || "").toLowerCase();
-    if (configuredProviders.has(providerLower)) {
-      usable.push({
-        id: m.id || m.model || m.name,
-        provider: m.provider || "",
-        name: m.name || m.id || "",
-        context_window: m.contextWindow ?? m.context_window ?? 0,
-      });
-    }
-  }
-
-  if (usable.length >= 2) {
-    return usable;
-  }
-
-  // ── Priority 3: fallback — current session model + first 3 available ──
-  if (usable.length === 0 && allModels.length > 0) {
-    const fallback: Array<{ id: string; provider: string; name: string; context_window: number }> = [];
-    if (currentModel) {
-      const cur = allModels.find((m: any) => m.provider === currentModel.provider && (m.id === currentModel.model || m.model === currentModel.model));
-      if (cur) {
-        fallback.push({
-          id: cur.id || cur.model || cur.name,
-          provider: cur.provider || "",
-          name: cur.name || cur.id || "",
-          context_window: cur.contextWindow ?? cur.context_window ?? 0,
-        });
-      }
-    }
-    for (const m of allModels) {
-      if (fallback.length >= 3) break;
-      const candidate = {
-        id: m.id || m.model || m.name,
-        provider: m.provider || "",
-        name: m.name || m.id || "",
-        context_window: m.contextWindow ?? m.context_window ?? 0,
-      };
-      if (!fallback.some((f) => f.id === candidate.id && f.provider === candidate.provider)) {
-        fallback.push(candidate);
-      }
-    }
-    return fallback;
-  }
-
-  return usable;
-}
-
 export class PiSession {
   private session: AgentSession | null = null;
   private sessionManager: SessionManager | null = null;
@@ -327,16 +80,24 @@ export class PiSession {
   private firstUserMessage: string = "";
   private lastActiveTime: number = Date.now();
 
-  private pendingReadPaths: Map<string, string> = new Map();
-  private pendingWriteEditPaths: Map<string, string> = new Map();
   private cachedStatus: string = "sleeping";
   private cachedDisplayName: string = "";
 
   // Empty turn resilience: track if this turn produced any content
   private hadContentThisTurn: boolean = false;
 
+  private fileHelpers!: ReturnType<typeof createFileHelpers>;
+
   constructor(cwd: string) {
     this.cwd = cwd;
+    // re-create helpers with correct cwd (field initializer used stale this.cwd)
+    this.fileHelpers = createFileHelpers(
+      this.cwd,
+      () => this.registerFileIdFn,
+      () => this.sendCallback,
+      () => this.getSessionId(),
+      () => this.getName()
+    );
   }
 
   getCwd(): string {
@@ -349,7 +110,7 @@ export class PiSession {
 
   private async getModelRuntime(): Promise<ModelRuntime> {
     if (!this.modelRuntime) {
-      this.modelRuntime = await ModelRuntime.create();
+      this.modelRuntime = await createModelRuntime();
     }
     return this.modelRuntime;
   }
@@ -362,11 +123,7 @@ export class PiSession {
     const modelRuntime = await this.getModelRuntime();
     this.sessionManager = SessionManager.create(this.cwd);
 
-    const { session } = await createAgentSession({
-      cwd: this.cwd,
-      sessionManager: this.sessionManager,
-      modelRuntime,
-    });
+    const { session } = await createSdkSession(this.cwd, this.sessionManager, modelRuntime);
 
     this.session = session;
 
@@ -378,7 +135,7 @@ export class PiSession {
         try {
           await session.setModel(defaultModel);
         } catch (e) {
-          console.warn(`[PiSession] setModel ${resolved.provider}/${resolved.model} failed:`, e);
+          sessionLogger(this.getSessionId() || "unknown").warn({ err: e, provider: resolved.provider, model: resolved.model }, "setModel failed");
         }
       }
     }
@@ -397,11 +154,7 @@ export class PiSession {
     }
 
     const modelRuntime = await this.getModelRuntime();
-    const { session } = await createAgentSession({
-      cwd: this.cwd,
-      sessionManager: sm,
-      modelRuntime,
-    });
+    const { session } = await createSdkSession(this.cwd, sm, modelRuntime);
 
     this.session = session;
     this.cachedSessionName = session.sessionName || sm.getSessionName() || sdkDisplay || sm.getSessionId() || "unnamed";
@@ -487,11 +240,11 @@ export class PiSession {
                   }
                 }
                 if (empty) {
-                  console.warn(`[PiSession:${this.getName()}] Empty turn detected — sending error frame`);
+                  sessionLogger(this.getSessionId() || this.getName()).warn("Empty turn detected — sending error frame");
                   send({ type: "error", message: "Model returned empty completion or rate limit hit. Please retry." });
                 }
               } catch (e) {
-                console.warn(`[PiSession:${this.getName()}] Empty turn check failed:`, e);
+                sessionLogger(this.getSessionId() || this.getName()).warn({ err: e }, "Empty turn check failed");
                 send({ type: "error", message: "Model returned empty completion or rate limit hit. Please retry." });
               }
             }
@@ -552,10 +305,14 @@ export class PiSession {
             const toolInput = JSON.stringify(event.args ?? {});
 
             if (toolName === "read" && event.args?.path) {
-              this.pendingReadPaths.set(toolId, event.args.path);
+              this.fileHelpers.pendingReadPaths.set(toolId, event.args.path);
             }
             if ((toolName === "write" || toolName === "edit") && event.args?.path) {
-              this.pendingWriteEditPaths.set(toolId, event.args.path);
+              this.fileHelpers.pendingWriteEditPaths.set(toolId, event.args.path);
+            }
+            // L0+ mobile_share_image — direct original path share, reuse write/edit map (same notify path)
+            if (toolName === "mobile_share_image" && event.args?.path) {
+              this.fileHelpers.pendingWriteEditPaths.set(toolId, event.args.path);
             }
 
             this.hadContentThisTurn = true;
@@ -599,33 +356,49 @@ export class PiSession {
             });
 
             if (!event.isError && (event.toolName === "write" || event.toolName === "edit")) {
-              const filePath = this.pendingWriteEditPaths.get(event.toolCallId);
-              this.pendingWriteEditPaths.delete(event.toolCallId);
+              const filePath = this.fileHelpers.pendingWriteEditPaths.get(event.toolCallId);
+              this.fileHelpers.pendingWriteEditPaths.delete(event.toolCallId);
               if (!filePath) {
-                console.warn(
-                  `[file-notify] ${event.toolName} tool_call=${event.toolCallId} ended with no captured args.path ` +
-                  `(pending=${this.pendingWriteEditPaths.size}) — file_available may be skipped. ` +
-                  `output=${text.slice(0, 120)}`
-                );
+                sessionLogger(this.getSessionId() || this.getName()).warn({ toolName: event.toolName, toolCallId: event.toolCallId, pending: this.fileHelpers.pendingWriteEditPaths.size }, "[file-notify] ended with no captured args.path — file_available may be skipped");
               }
               await this.detectAndNotifyFile(event.toolName, text, filePath);
             }
+            if (!event.isError && event.toolName === "mobile_share_image") {
+              const filePath = this.fileHelpers.pendingWriteEditPaths.get(event.toolCallId);
+              this.fileHelpers.pendingWriteEditPaths.delete(event.toolCallId);
+              if (!filePath) {
+                sessionLogger(this.getSessionId() || this.getName()).warn({ toolName: event.toolName, toolCallId: event.toolCallId }, "[mobile_share] no captured args.path");
+              } else {
+                sessionLogger(this.getSessionId() || this.getName()).info({ filePath, toolCallId: event.toolCallId }, "[mobile_share] detected share request");
+              }
+              // mobile_share_image 直接发原路径，不经 write→D:/tmp 复制，复用 resolveUnifiedPath，id=hex
+              await this.detectAndNotifyFile("mobile_share_image", text, filePath);
+            }
             if (!event.isError && event.toolName === "read") {
-              const filePath = this.pendingReadPaths.get(event.toolCallId);
+              const filePath = this.fileHelpers.pendingReadPaths.get(event.toolCallId);
               if (filePath) {
-                this.pendingReadPaths.delete(event.toolCallId);
+                this.fileHelpers.pendingReadPaths.delete(event.toolCallId);
                 await this.detectAndNotifyFile("read", "", filePath, { notify: false });
               }
+            }
+            // L0 fix — bash after file ops: cp / base64 pipelines produce/update files without write/edit
+            // Re-trigger file_available with correct stat size (111K not 43B placeholder)
+            if (!event.isError && event.toolName === "bash") {
+              const rawCmd = (event as any).args?.command ?? (event as any).args?.cmd ?? "";
+              const rawOutput = text;
+              // try explicit file detection from bash output text (e.g. cp success) plus command parsing
+              const combined = `${rawCmd}\n${rawOutput}`;
+              await this.handleBashFileUpdate(combined, rawCmd);
             }
             return;
           }
         }
 
         if (!KNOWN_EVENT_TYPES.has(event.type)) {
-          console.warn(`[PiSession:${this.getName()}] Unknown SDK event type: ${event.type}`);
+          sessionLogger(this.getSessionId() || this.getName()).warn({ eventType: event.type }, "Unknown SDK event type");
         }
       } catch (err) {
-        console.error("Error in event handler:", err);
+        sessionLogger(this.getSessionId() || this.getName()).error({ err }, "Error in event handler");
       }
     });
   }
@@ -634,7 +407,7 @@ export class PiSession {
   //  History - lazy toolCall recovery
   // ──────────────────────────────────────────────
 
-  getHistory(): Array<{ role: string; text: string; thinking?: string; files?: FileMeta[]; timestamp?: number }> {
+  getHistory(opts?: { limit?: number; offset?: number }): Array<{ role: string; text: string; thinking?: string; files?: FileMeta[]; timestamp?: number }> {
     if (!this.session) return [];
     try {
       const messages = this.session.messages;
@@ -685,12 +458,12 @@ export class PiSession {
               thinking += c.thinking;
             } else if (
               (c.type === "toolCall" || c.type === "tool_use") &&
-              (c.name === "write" || c.name === "edit")
+              (c.name === "write" || c.name === "edit" || c.name === "mobile_share_image")
             ) {
               const filePathStr = c.args?.path || c.parameters?.path || (c as any).arguments?.path;
               if (typeof filePathStr === "string" && filePathStr.trim().length > 0) {
                 try {
-                  const absPath = resolve(this.cwd, filePathStr.trim());
+                  const absPath = resolveUnifiedPath(this.cwd, filePathStr.trim(), this.getSessionId(), this.getName());
                   if (existsSync(absPath)) {
                     const fileStat = statSync(absPath);
                     if (fileStat.isFile()) {
@@ -699,6 +472,10 @@ export class PiSession {
                       const content_type = getContentType(filename);
                       const id = Buffer.from(absPath).toString("hex");
                       this.registerFileIdFn?.(id, absPath);
+                      try {
+                        const alt = absPath.replace(/\\/g, "/");
+                        if (alt !== absPath) this.registerFileIdFn?.(Buffer.from(alt).toString("hex"), absPath);
+                      } catch {}
                       if (!files.some((f) => f.id === id)) {
                         files.push({ id, name: filename, size, content_type });
                       }
@@ -722,6 +499,15 @@ export class PiSession {
         result.push(entry);
       }
 
+      // Pagination: limit/offset (default: all). Sliced after full scan to keep toolCall recovery intact.
+      if (opts?.limit != null && opts.limit >= 0) {
+        const offset = opts.offset ?? Math.max(0, result.length - opts.limit);
+        // if offset not provided, take last N (most recent)
+        if (opts.offset == null) {
+          return result.slice(-opts.limit);
+        }
+        return result.slice(offset, offset + opts.limit);
+      }
       return result;
     } catch {
       return [];
@@ -792,7 +578,7 @@ export class PiSession {
         } : undefined,
       });
     } catch (err) {
-      console.error("Error sending state update:", err);
+      sessionLogger(this.getSessionId() || this.getName()).error({ err }, "Error sending state update");
     }
   }
 
@@ -842,7 +628,7 @@ export class PiSession {
       try {
         this.sessionManager.appendSessionInfo(name);
       } catch (err: any) {
-        console.warn(`setSessionName: failed to persist session_info for sleeping session: ${err?.message}`);
+        sessionLogger(this.getSessionId() || "unknown").warn({ err }, "setSessionName: failed to persist session_info for sleeping session");
       }
     }
     this.cachedSessionName = name;
@@ -869,8 +655,8 @@ export class PiSession {
       this.unsubscribeFn();
       this.unsubscribeFn = null;
     }
-    this.pendingReadPaths.clear();
-    this.pendingWriteEditPaths.clear();
+    this.fileHelpers.pendingReadPaths.clear();
+    this.fileHelpers.pendingWriteEditPaths.clear();
     if (this.session) {
       this.cachedSessionName = this.session.sessionName || "unnamed";
       try {
@@ -892,11 +678,7 @@ export class PiSession {
 
     try {
       const modelRuntime = await this.getModelRuntime();
-      const { session } = await createAgentSession({
-        cwd: this.cwd,
-        sessionManager: this.sessionManager,
-        modelRuntime,
-      });
+      const { session } = await createSdkSession(this.cwd, this.sessionManager, modelRuntime);
 
       this.session = session;
 
@@ -904,7 +686,7 @@ export class PiSession {
         this._subscribeInternal(this.mode);
       }
     } catch (err) {
-      console.error(`PiSession.wakeUp failed for "${this.cachedSessionName}":`, err);
+      sessionLogger(this.getSessionId() || this.cachedSessionName).error({ err }, `PiSession.wakeUp failed for "${this.cachedSessionName}"`);
       throw new Error(
         `Failed to wake session "${this.cachedSessionName}": ${(err as any)?.message || err}`
       );
@@ -1028,7 +810,7 @@ export class PiSession {
               await this.session.prompt(content);
             }
           } catch (err: any) {
-            console.error("Error in prompt/steer:", err);
+            sessionLogger(this.getSessionId() || this.getName()).error({ err }, "Error in prompt/steer");
             send({ type: "error", message: err?.message || "Model returned empty completion or rate limit hit. Please retry." });
             send({ type: "message_end" });
             this.hadContentThisTurn = false;
@@ -1111,7 +893,7 @@ export class PiSession {
           try {
             const currentModel = this.session.model ? { provider: (this.session.model as any).provider || "", model: (this.session.model as any).id || "" } : null;
             const models = await getFilteredModels(this.session.modelRuntime, currentModel);
-            console.log(`[models] get_models -> ${models.length} models (first: ${models.slice(0, 3).map((m: any) => m.id).join(", ")})`);
+            sessionLogger(this.getSessionId() || this.getName()).info({ count: models.length, first: models.slice(0, 3).map((m: any) => m.id).join(", ") }, "get_models -> models");
             send({ type: "model_list", models });
           } catch {
             send({ type: "error", message: "Failed to get model list" });
@@ -1127,7 +909,7 @@ export class PiSession {
           break;
       }
     } catch (err: any) {
-      console.error("Error handling message:", err);
+      sessionLogger(this.getSessionId() || this.getName()).error({ err }, "Error handling message");
       send({
         type: "error",
         message: err?.message || "Internal server error",
@@ -1150,40 +932,79 @@ export class PiSession {
     let filePath: string | null = null;
 
     if (explicitPath) {
-      const { resolve } = await import("node:path");
-      filePath = resolve(this.cwd, explicitPath);
+      filePath = resolveUnifiedPath(this.cwd, explicitPath, this.getSessionId(), this.getName());
     } else if (toolName === "write") {
       const match = outputText.match(/(?:wrote\s+\d+\s+bytes?\s+to\s+)(.+)$/m);
       if (match) {
-        const { resolve } = await import("node:path");
-        filePath = resolve(this.cwd, match[1].trim());
+        filePath = resolveUnifiedPath(this.cwd, match[1].trim(), this.getSessionId(), this.getName());
       }
     } else if (toolName === "edit") {
       const match = outputText.match(/(?:replaced\s+\d+\s+block.*?\s+in\s+)(.+)$/m);
       if (match) {
-        const { resolve } = await import("node:path");
-        filePath = resolve(this.cwd, match[1].trim());
+        filePath = resolveUnifiedPath(this.cwd, match[1].trim(), this.getSessionId(), this.getName());
       }
     }
 
     if (!filePath) {
-      console.warn(
-        `[file-notify] ${toolName} produced no path (args miss + regex miss); output=${outputText.slice(0, 160)}`
-      );
+      sessionLogger(this.getSessionId() || this.getName()).warn({ toolName, outputPreview: outputText.slice(0, 160) }, "[file-notify] produced no path");
       return;
     }
 
     try {
-      const { stat } = await import("node:fs/promises");
+      const { stat, readFile } = await import("node:fs/promises");
       const fileStat = await stat(filePath);
       if (!fileStat.isFile()) return;
 
-      const filename = filePath.split(/[\\/]/).pop() || "file";
+      // Guard: placeholder write (43B) — skip notify until real binary lands via bash cp/base64
       const size = fileStat.size;
+      if (size === 43) {
+        try {
+          const head = await readFile(filePath, "utf-8");
+          if (head.includes("PLACEHOLDER_WILL_BE_OVERWRITTEN_WITH_BINARY")) {
+            sessionLogger(this.getSessionId() || this.getName()).warn(
+              { filePath, size },
+              "[file-notify] placeholder detected — skip file_available, wait for bash cp/base64"
+            );
+            // Still register so /files/ can resolve, but do not notify with bogus size
+            // Register anyway to keep id stable; size will be corrected on next bash update
+            const idPlaceholder = Buffer.from(filePath).toString("hex");
+            this.registerFileIdFn?.(idPlaceholder, filePath);
+            try {
+              const altPlace = filePath.replace(/\\/g, "/");
+              if (altPlace !== filePath) this.registerFileIdFn?.(Buffer.from(altPlace).toString("hex"), filePath);
+            } catch {}
+            return;
+          }
+        } catch {}
+      }
+
+      // L0 verification: after base64 -d, ensure PNG when expected (image/*)
+      // stat size must be final (111K not 43B) — already from stat
+      const filename = filePath.split(/[\\/]/).pop() || "file";
       const content_type = getContentType(filename);
       const id = Buffer.from(filePath).toString("hex");
 
       this.registerFileIdFn?.(id, filePath);
+      // Also register forward-slash variant for curl compatibility: D:/worksave/... vs D:\worksave\...
+      // Task 3a expects curl with D:/worksave/10-pi/tmp/cv-real.png (2f) while resolve returns D:\... (5c).
+      // Register both so either hex works, without weakening security (same underlying file).
+      try {
+        const altPath = filePath.replace(/\\/g, "/");
+        if (altPath !== filePath) {
+          const altId = Buffer.from(altPath).toString("hex");
+          if (altId !== id) this.registerFileIdFn?.(altId, filePath);
+        }
+        const altPath2 = filePath.replace(/\//g, "\\");
+        if (altPath2 !== filePath) {
+          const altId2 = Buffer.from(altPath2).toString("hex");
+          if (altId2 !== id) this.registerFileIdFn?.(altId2, filePath);
+        }
+      } catch {}
+
+      sessionLogger(this.getSessionId() || this.getName()).info(
+        { filePath, id, size, content_type },
+        "[file-notify] file_available registered"
+      );
 
       if (opts.notify === false) return;
 
@@ -1196,8 +1017,95 @@ export class PiSession {
           content_type,
         });
       }
-    } catch {
-      // File may not be readable — skip
+    } catch (e) {
+      sessionLogger(this.getSessionId() || this.getName()).warn(
+        { err: e, filePath },
+        "[file-notify] stat/read failed"
+      );
+    }
+  }
+
+  /** L0 fix — bash cp / base64 -d pipelines: re-trigger file_available with real stat size */
+  private async handleBashFileUpdate(combinedText: string, _rawCommand: string): Promise<void> {
+    try {
+      const candidates = extractBashFileTargets(combinedText);
+      if (candidates.length === 0) return;
+      // Also attempt to sync D:/tmp <-> C:/Users/.../Temp drift for /tmp paths
+      const { stat, copyFile, mkdir, readFile } = await import("node:fs/promises");
+      const { dirname } = await import("node:path");
+      const gitBashTmp = "C:/Users/Administrator/AppData/Local/Temp";
+      for (const raw of candidates) {
+        let resolved: string | null = null;
+        try {
+          // normalize raw for resolveUnifiedPath — strip quotes already done
+          resolved = resolveUnifiedPath(this.cwd, raw, this.getSessionId(), this.getName());
+        } catch {
+          continue;
+        }
+        // If raw was a /tmp path, ensure drift copy: C:\Temp file -> D:\tmp file
+        if (raw.startsWith("/tmp/")) {
+          const rest = raw.slice(5);
+          const winTmpPath = `${gitBashTmp}/${rest}`;
+          const unifiedPath = resolved; // D:\tmp\...
+          // If bash actually wrote to winTmp but unified is D:\tmp, copy over to unify
+          try {
+            const sWin = await stat(winTmpPath).catch(() => null);
+            const sUni = await stat(unifiedPath).catch(() => null);
+            if (sWin && sWin.isFile()) {
+              // md5 not needed — size check + PNG header check
+              const needCopy = !sUni || sWin.size !== sUni.size || sUni.size === 43;
+              if (needCopy) {
+                try {
+                  await mkdir(dirname(unifiedPath), { recursive: true });
+                  await copyFile(winTmpPath, unifiedPath);
+                  sessionLogger(this.getSessionId() || this.getName()).info(
+                    { winTmpPath, unifiedPath, size: sWin.size },
+                    "[bash-sync] copied Git Bash /tmp -> D:/tmp unified"
+                  );
+                } catch (e) {
+                  sessionLogger(this.getSessionId() || this.getName()).warn({ err: e, winTmpPath, unifiedPath }, "[bash-sync] copy failed");
+                }
+              }
+            }
+          } catch {}
+        }
+        // Now treat resolved as the file to notify (unified path)
+        try {
+          const st = await stat(resolved);
+          if (!st.isFile()) continue;
+          // Skip placeholder again
+          if (st.size === 43) {
+            try {
+              const h = await readFile(resolved, "utf-8");
+              if (h.includes("PLACEHOLDER_WILL_BE_OVERWRITTEN_WITH_BINARY")) continue;
+            } catch {}
+          }
+          // Optional PNG validation for image paths
+          const filename = resolved.split(/[\\/]/).pop() || "file";
+          const content_type = getContentType(filename);
+          const id = Buffer.from(resolved).toString("hex");
+          this.registerFileIdFn?.(id, resolved);
+          try {
+            const alt = resolved.replace(/\\/g, "/");
+            if (alt !== resolved) this.registerFileIdFn?.(Buffer.from(alt).toString("hex"), resolved);
+          } catch {}
+          if (this.sendCallback) {
+            this.sendCallback({
+              type: "file_available",
+              id,
+              name: filename,
+              size: st.size,
+              content_type,
+            });
+            sessionLogger(this.getSessionId() || this.getName()).info(
+              { filePath: resolved, id, size: st.size, content_type, via: "bash" },
+              "[file-notify] bash re-trigger file_available"
+            );
+          }
+        } catch {}
+      }
+    } catch (e) {
+      sessionLogger(this.getSessionId() || this.getName()).warn({ err: e }, "[bash-sync] handleBashFileUpdate failed");
     }
   }
 
@@ -1210,8 +1118,8 @@ export class PiSession {
       this.unsubscribeFn();
       this.unsubscribeFn = null;
     }
-    this.pendingReadPaths.clear();
-    this.pendingWriteEditPaths.clear();
+    this.fileHelpers.pendingReadPaths.clear();
+    this.fileHelpers.pendingWriteEditPaths.clear();
     if (this.session) {
       this.session.dispose();
       this.session = null;
